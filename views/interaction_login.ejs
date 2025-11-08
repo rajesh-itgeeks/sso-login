@@ -1,0 +1,22 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Login</title>
+</head>
+<body>
+    <h2>Login Required</h2>
+    <p>Client: <%= interaction.params.client_id %></p>
+    
+    <div>
+        <a href="<%= baseUrl %>/auth/start?provider=google&uid=<%= uid %>">
+            Login with Google
+        </a>
+    </div>
+    
+    <form action="<%= baseUrl %>/interaction/<%= uid %>" method="POST">
+        <input type="hidden" name="login" value='{"accountId":"test-user","acr":"urn:mace:incommon:iap:silver"}'>
+        <input type="hidden" name="consent" value='{}'>
+        <button type="submit">Test Login (Development)</button>
+    </form>
+</body>
+</html>

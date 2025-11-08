@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Completing Authentication</title>
+    <script>
+        window.onload = function() {
+            console.log('Auto-submitting authentication form...');
+            document.getElementById('authForm').submit();
+        };
+        
+        setTimeout(function() {
+            document.getElementById('manualSubmit').style.display = 'block';
+        }, 3000);
+    </script>
+</head>
+<body>
+    <h2>Completing Authentication...</h2>
+    <p>If you are not redirected automatically, click the button below.</p>
+    
+    <form id="authForm" action="<%= baseUrl %>/interaction/<%= uid %>" method="POST">
+        <% if (login) { %>
+            <input type="hidden" name="login" value='<%= login %>'>
+        <% } %>
+        <input type="hidden" name="consent" value='<%= consent %>'>
+        <button id="manualSubmit" type="submit" style="display: none;">Continue Manually</button>
+    </form>
+    
+    <p><small>If this page doesn't redirect, check the browser console for errors.</small></p>
+</body>
+</html>

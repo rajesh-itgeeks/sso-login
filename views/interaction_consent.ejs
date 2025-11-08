@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Consent</title>
+</head>
+<body>
+    <h2>Authorization Consent</h2>
+    <p>Client: <%= interaction.params.client_id %> wants to access your information.</p>
+    
+    <form action="<%= baseUrl %>/interaction/<%= uid %>" method="POST">
+        <input type="hidden" name="consent" value='{"grant":true}'>
+        <button type="submit">Allow</button>
+    </form>
+</body>
+</html>

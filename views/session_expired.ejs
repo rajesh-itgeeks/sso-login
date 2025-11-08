@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Session Expired</title>
+</head>
+<body>
+    <h2>Session Expired</h2>
+    <p>Your authentication session has expired. Please try again.</p>
+    <p><strong>Interaction ID:</strong> <%= uid %></p>
+    <p><strong>Session ID:</strong> <%= sessionId %></p>
+    <div>
+        <a href="/">Return to Home</a> | 
+        <a href="<%= baseUrl %>/interaction/<%= uid %>">Retry Interaction</a>
+    </div>
+</body>
+</html>
