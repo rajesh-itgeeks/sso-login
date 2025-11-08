@@ -149,44 +149,66 @@ const accounts = new Map();
 
 // OIDC Configuration
 const configuration = {
-  clients: [{
-    client_id: SHOPIFY_CLIENT_ID,
-    client_secret: SHOPIFY_CLIENT_SECRET, 
-    grant_types: ["authorization_code"],
-    response_types: ["code"],
-    redirect_uris: [
-      "https://shopify.com/authentication/70223167535/login/external/callback",
-      "https://rajesh-itgeeks.account.myshopify.com/authentication/login/external/callback"
-    ],
-    token_endpoint_auth_method: "client_secret_post"
-  }],
-  
+  clients: [
+    {
+      client_id: SHOPIFY_CLIENT_ID,
+      client_secret: SHOPIFY_CLIENT_SECRET,
+      grant_types: ["authorization_code"],
+      response_types: ["code"],
+      redirect_uris: [
+        "https://shopify.com/authentication/70223167535/login/external/callback",
+        "https://rajesh-itgeeks.account.myshopify.com/authentication/login/external/callback"
+      ],
+      token_endpoint_auth_method: "client_secret_post",
+    },
+  ],
+
+  // ✅ Set custom TTLs to remove the NOTICE and ensure stable interactions
+  ttl: {
+    AccessToken: 3600, // 1 hour
+    AuthorizationCode: 600, // 10 minutes
+    IdToken: 3600, // 1 hour
+    Session: 24 * 60 * 60, // 1 day
+    Interaction: 5 * 60, // 5 minutes — prevents old /interaction links from breaking
+  },
+
   interactions: {
     url(ctx, interaction) {
       return `/interaction/${interaction.uid}`;
-    }
+    },
   },
-  
+
   cookies: {
-    keys: [SESSION_SECRET]
+    keys: [SESSION_SECRET],
+    long: {
+      secure: true,
+      sameSite: 'none',
+      signed: true,
+    },
+    short: {
+      secure: true,
+      sameSite: 'none',
+      signed: true,
+    },
   },
-  
+
   findAccount: async (ctx, id) => {
     console.log("🔍 Finding account:", id);
     return accounts.get(id) || null;
   },
-  
+
   claims: {
     openid: ["sub"],
     email: ["email", "email_verified"],
-    profile: ["name"]
+    profile: ["name"],
   },
-  
+
   features: {
     devInteractions: { enabled: false },
-    rpInitiatedLogout: { enabled: true }
-  }
+    rpInitiatedLogout: { enabled: true },
+  },
 };
+
 
 console.log(configuration, "===========")
 
