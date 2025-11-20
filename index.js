@@ -310,6 +310,7 @@ app.get("/auth/start", async (req, res, next) => {
 });
 
 // Google Callback
+// Google Callback
 app.get(
   "/auth/google/callback",
   (req, res, next) => {
@@ -322,21 +323,19 @@ app.get(
   async (req, res) => {
     try {
       if (!req.user) throw new Error("No user data received");
-
+ 
       const profile = req.user.profile;
       const uidFromState = req.query.state;
       const uid = uidFromState || req.session.currentUid;
-
+ 
       console.log("✅ Google Auth Success for UID:", uid);
-
+ 
       if (!uid) return res.status(400).send("Missing UID");
-
+ 
       // Create or find Shopify customer
-      const shopifyCustomer = await shopifyService.findOrCreateCustomer(
-        profile
-      );
+      const shopifyCustomer = await shopifyService.findOrCreateCustomer(profile);
       console.log("🛍️ Shopify Customer ID:", shopifyCustomer.id);
-
+ 
       // Create OIDC account object
       const accountId = shopifyCustomer.id.toString();
       const account = {
@@ -346,31 +345,29 @@ app.get(
             sub: accountId,
             email: shopifyCustomer.email,
             email_verified: true,
-            name: `${shopifyCustomer.first_name || ""} ${
-              shopifyCustomer.last_name || ""
-            }`.trim()
+            name: `${shopifyCustomer.first_name || ""} ${shopifyCustomer.last_name || ""}`.trim()
           };
         }
       };
-
+ 
       accounts.set(accountId, account);
       console.log("💾 OIDC Account stored:", accountId);
-
-      // ✅ Complete OIDC flow for login ONLY
+ 
+      // ✅ Use interactionResult with explicit UID instead of interactionFinished(req, res,...)
       const result = {
         login: {
           accountId,
           remember: true
         }
       };
-
-      console.log("🎯 Completing OIDC login flow...");
-      await oidc.interactionFinished(req, res, result, {
+ 
+      console.log("🎯 Completing OIDC login flow via interactionResult for UID:", uid);
+      const redirectTo = await oidc.interactionResult(uid, result, {
         mergeWithLastSubmission: false
       });
-      console.log(
-        "✅ OIDC login flow completed - User should be redirected to Shopify"
-      );
+ 
+      console.log("✅ OIDC login flow completed, redirecting to:", redirectTo);
+      return res.redirect(redirectTo);
     } catch (error) {
       console.error("❌ Google callback error:", error);
       res.status(500).send("Authentication error");
