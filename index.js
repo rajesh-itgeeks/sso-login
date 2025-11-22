@@ -1,13 +1,13 @@
+// index.js
 import express from "express";
 import dotenv from "dotenv";
-import path from "path";
 import session from "express-session";
 import bodyParser from "body-parser";
 import { Provider } from "oidc-provider";
-import passport from "passport";
-import { Strategy as GoogleStrategy } from "passport-google-oauth20";
 import { fileURLToPath } from "url";
+import path from "path";
 import axios from "axios";
+import { OAuth2Client } from "google-auth-library";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -15,75 +15,54 @@ const __dirname = path.dirname(__filename);
 dotenv.config();
 
 const {
-  PORT,
+  PORT = 3000,
   BASE_URL,
   SESSION_SECRET = "change_me_secret_key",
   SHOPIFY_CLIENT_ID,
   SHOPIFY_CLIENT_SECRET,
   GOOGLE_CLIENT_ID,
-  GOOGLE_CLIENT_SECRET,
-  GOOGLE_CALLBACK,
   SHOPIFY_STORE_DOMAIN,
-  SHOPIFY_ADMIN_ACCESS_TOKEN
+  SHOPIFY_ADMIN_ACCESS_TOKEN,
 } = process.env;
+
+if (!BASE_URL) throw new Error("BASE_URL env var is required");
+if (!GOOGLE_CLIENT_ID) throw new Error("GOOGLE_CLIENT_ID env var is required");
+
+const isProd = BASE_URL.startsWith("https://");
 
 console.log("🔧 Environment Check:");
 console.log("BASE_URL:", BASE_URL);
 console.log("SHOPIFY_CLIENT_ID:", SHOPIFY_CLIENT_ID);
+console.log("GOOGLE_CLIENT_ID:", GOOGLE_CLIENT_ID);
+console.log("SHOPIFY_STORE_DOMAIN:", SHOPIFY_STORE_DOMAIN);
 
 const app = express();
 
-// Behind Cloudflare / proxy so that secure cookies are honored
+// Trust proxy (Cloudflare tunnel / Render / nginx, etc.)
 app.set("trust proxy", 1);
 
-// Session configuration (for our app + Passport)
-// NOTE: SameSite=None + secure required for cross-site OIDC redirects
-
-const isProd = BASE_URL?.startsWith("https://");
-
+// Session for *your* app (NOT oidc-provider)
 app.use(
   session({
     secret: SESSION_SECRET,
-    resave: true,
+    resave: false,
     saveUninitialized: false,
-    name: "oidc.session",
+    name: "app.session",
     cookie: {
-      secure: isProd,          // requires HTTPS
+      secure: isProd,
       httpOnly: true,
-      sameSite: "none",      // critical for OIDC redirects
-      domain: undefined,
-      maxAge: 30 * 60 * 1000 // 30 minutes
-    }
+      sameSite: isProd ? "none" : "lax",
+      maxAge: 30 * 60 * 1000, // 30 mins
+    },
   })
 );
 
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
-// Passport setup
-passport.serializeUser((user, done) => done(null, user));
-passport.deserializeUser((obj, done) => done(null, obj));
-
-if (GOOGLE_CLIENT_ID && GOOGLE_CLIENT_SECRET) {
-  passport.use(
-    new GoogleStrategy(
-      {
-        clientID: GOOGLE_CLIENT_ID,
-        clientSecret: GOOGLE_CLIENT_SECRET,
-        callbackURL: GOOGLE_CALLBACK,
-        passReqToCallback: true
-      },
-      (req, accessToken, refreshToken, profile, cb) => {
-        console.log("✅ Google profile received:", profile.displayName);
-        return cb(null, { provider: "google", profile });
-      }
-    )
-  );
-  app.use(passport.initialize());
-  app.use(passport.session());
-}
-
+// ---------------------------
 // Shopify Customer Service
+// ---------------------------
 class ShopifyCustomerService {
   constructor() {
     this.shopifyAdminAPI = SHOPIFY_STORE_DOMAIN
@@ -93,35 +72,32 @@ class ShopifyCustomerService {
     this.headers = SHOPIFY_ADMIN_ACCESS_TOKEN
       ? {
           "X-Shopify-Access-Token": SHOPIFY_ADMIN_ACCESS_TOKEN,
-          "Content-Type": "application/json"
+          "Content-Type": "application/json",
         }
       : null;
   }
 
-  async findOrCreateCustomer(googleProfile) {
-    if (!this.shopifyAdminAPI || !this.headers) {
-      // Mock mode if no Shopify config
-      return {
-        id: "mock_" + googleProfile.id,
-        email: googleProfile.emails[0].value,
-        first_name:
-          googleProfile.name?.givenName ||
-          googleProfile.displayName.split(" ")[0],
-        last_name:
-          googleProfile.name?.familyName ||
-          googleProfile.displayName.split(" ")[1] ||
-          ""
-      };
+  async findOrCreateCustomer(googlePayload) {
+    const email = googlePayload.email;
+    const firstName =
+      googlePayload.given_name || googlePayload.name?.split(" ")[0] || "";
+    const lastName =
+      googlePayload.family_name || googlePayload.name?.split(" ")[1] || "";
+
+    if (!email) {
+      throw new Error("Google ID token did not contain an email.");
     }
 
-    const email = googleProfile.emails[0].value;
-    const firstName =
-      googleProfile.name?.givenName ||
-      googleProfile.displayName.split(" ")[0];
-    const lastName =
-      googleProfile.name?.familyName ||
-      googleProfile.displayName.split(" ")[1] ||
-      "";
+    // If Shopify not configured, just mock
+    if (!this.shopifyAdminAPI || !this.headers) {
+      console.log("⚠️ Shopify not configured, returning mock customer.");
+      return {
+        id: "mock_" + googlePayload.sub,
+        email,
+        first_name: firstName,
+        last_name: lastName,
+      };
+    }
 
     try {
       console.log("🔍 Searching customer with email:", email);
@@ -148,10 +124,10 @@ class ShopifyCustomerService {
         customer: {
           first_name: firstName,
           last_name: lastName,
-          email: email,
+          email,
           verified_email: true,
-          send_email_welcome: false
-        }
+          send_email_welcome: false,
+        },
       };
 
       const createResponse = await axios.post(
@@ -165,10 +141,10 @@ class ShopifyCustomerService {
     } catch (error) {
       console.error("❌ Shopify customer error:", error.message);
       return {
-        id: "error_fallback_" + googleProfile.id,
-        email: email,
+        id: "error_fallback_" + googlePayload.sub,
+        email,
         first_name: firstName,
-        last_name: lastName
+        last_name: lastName,
       };
     }
   }
@@ -176,11 +152,19 @@ class ShopifyCustomerService {
 
 const shopifyService = new ShopifyCustomerService();
 
-// Accounts store (in-memory for now; replace with DB in prod)
-const accounts = new Map();
+// ---------------------------
+// Google ID Token verifier
+// ---------------------------
+const googleClient = new OAuth2Client(GOOGLE_CLIENT_ID);
 
-// OIDC Configuration
+// ---------------------------
+// OIDC Provider configuration
+// ---------------------------
+const accounts = new Map(); // key: Shopify customer ID
+
 const configuration = {
+  // ❌ no custom adapter – use oidc-provider's built-in memory adapter
+
   clients: [
     {
       client_id: SHOPIFY_CLIENT_ID,
@@ -188,100 +172,98 @@ const configuration = {
       grant_types: ["authorization_code"],
       response_types: ["code"],
       redirect_uris: [
+        // must match Shopify external IdP callbacks exactly
         "https://shopify.com/authentication/70223167535/login/external/callback",
-        "https://rajesh-itgeeks.account.myshopify.com/authentication/login/external/callback"
+        "https://rajesh-itgeeks.account.myshopify.com/authentication/login/external/callback",
       ],
-      token_endpoint_auth_method: "client_secret_post"
-    }
+      token_endpoint_auth_method: "client_secret_post",
+    },
   ],
 
   interactions: {
     url(ctx, interaction) {
       return `/interaction/${interaction.uid}`;
-    }
+    },
   },
 
-  // OIDC cookies (separate from express-session)
   cookies: {
     keys: [SESSION_SECRET],
     names: {
       session: "oidc.sid",
       interaction: "_interaction",
-      resume: "_interaction_resume"
+      resume: "_interaction_resume",
     },
     short: {
       signed: true,
-      sameSite: "none",
-      secure: true
+      sameSite: isProd ? "none" : "lax",
+      secure: isProd,
     },
     long: {
       signed: true,
-      sameSite: "none",
-      secure: true
-    }
+      sameSite: isProd ? "none" : "lax",
+      secure: isProd,
+    },
   },
 
-  findAccount: async (ctx, id) => {
-    console.log("🔍 Finding account:", id);
+  // Increase TTLs a bit so "authorization request has expired" is less likely
+  ttl: {
+    // Interaction artifacts (login/consent) – 15 minutes
+    Interaction: () => 15 * 60,
+    // Sessions – 1 day
+    Session: () => 24 * 60 * 60,
+  },
+
+  async findAccount(ctx, id) {
+    console.log("🔍 findAccount called with id:", id);
     const acc = accounts.get(id);
-    // oidc-provider expects { accountId, claims }
     return acc || undefined;
   },
 
   claims: {
     openid: ["sub"],
     email: ["email", "email_verified"],
-    profile: ["name"]
+    profile: ["name"],
   },
 
   features: {
     devInteractions: { enabled: false },
-    rpInitiatedLogout: { enabled: true }
-  }
+    rpInitiatedLogout: { enabled: true },
+  },
 };
 
-console.log(configuration, "===========");
-
 const oidc = new Provider(BASE_URL, configuration);
-oidc.proxy = true;
+oidc.proxy = true; // trust X-Forwarded-* from tunnel / proxy
 
-oidc.on('server_error', (ctx, err) => {
-  console.error('💥 OIDC server_error on', ctx.method, ctx.path);
-  console.error('   Query:', ctx.query);
-  console.error(err);
-});
-
-// Logging middleware on the OIDC (Koa) side
-oidc.app.use(async (ctx, next) => {
+// Debug redirects
+oidc.use(async (ctx, next) => {
   await next();
   if (ctx.status === 302 && ctx.response.get("location")) {
-    const redirectUrl = ctx.response.get("location");
-    console.log("🎯 OIDC Redirecting to:", redirectUrl);
-
-    if (
-      redirectUrl.includes(
-        "shopify.com/authentication/login/external/callback"
-      )
-    ) {
-      console.log("✅ SUCCESS: Redirecting to Shopify callback URL!");
-      console.log("🔗 Shopify Callback URL:", redirectUrl);
-    }
+    console.log("🎯 OIDC Redirect:", ctx.response.get("location"));
   }
 });
 
-// Routes
+// Debug internal errors
+oidc.on("server_error", (ctx, err) => {
+  console.error("💥 OIDC server_error on", ctx.path, err);
+});
+
+// ---------------------------
+// App routes
+// ---------------------------
+
 app.get("/", (req, res) => {
   res.send(`
     <html>
       <body>
         <h1>OIDC Server for Shopify</h1>
-        <p><a href="/authorize">Start OAuth Flow</a></p>
+        <p>Issuer: ${BASE_URL}</p>
+        <p>Discovery: <a href="${BASE_URL}/.well-known/openid-configuration">${BASE_URL}/.well-known/openid-configuration</a></p>
       </body>
     </html>
   `);
 });
 
-// Start OAuth flow (manual test helper)
+// Optional manual test
 app.get("/authorize", (req, res) => {
   const authUrl = `${BASE_URL}/auth?client_id=${encodeURIComponent(
     SHOPIFY_CLIENT_ID
@@ -292,142 +274,154 @@ app.get("/authorize", (req, res) => {
   res.redirect(authUrl);
 });
 
-// Start Google Auth (for current interaction UID)
-app.get("/auth/start", async (req, res, next) => {
-  const uid = req.query.uid || req.session.currentUid;
-  console.log("🚀 Starting Google Auth for UID:", uid);
-
-  if (!uid) return res.status(400).send("Missing UID");
-  req.session.uid = uid;
-  req.session.currentUid = uid;
-  await req.session.save();
-
-  // Pass interaction UID as OAuth state
-  passport.authenticate("google", {
-    scope: ["profile", "email"],
-    state: uid
-  })(req, res, next);
-});
-
-// Google Callback
-// Google Callback
-app.get(
-  "/auth/google/callback",
-  (req, res, next) => {
-    console.log("🔄 Google callback received");
-    passport.authenticate("google", {
-      failureRedirect: "/auth/failure",
-      failureMessage: true
-    })(req, res, next);
-  },
-  async (req, res) => {
-    try {
-      if (!req.user) throw new Error("No user data received");
- 
-      const profile = req.user.profile;
-      const uidFromState = req.query.state;
-      const uid = uidFromState || req.session.currentUid;
- 
-      console.log("✅ Google Auth Success for UID:", uid);
- 
-      if (!uid) return res.status(400).send("Missing UID");
- 
-      // Create or find Shopify customer
-      const shopifyCustomer = await shopifyService.findOrCreateCustomer(profile);
-      console.log("🛍️ Shopify Customer ID:", shopifyCustomer.id);
- 
-      // Create OIDC account object
-      const accountId = shopifyCustomer.id.toString();
-      const account = {
-        accountId,
-        async claims(use, scope) {
-          return {
-            sub: accountId,
-            email: shopifyCustomer.email,
-            email_verified: true,
-            name: `${shopifyCustomer.first_name || ""} ${shopifyCustomer.last_name || ""}`.trim()
-          };
-        }
-      };
- 
-      accounts.set(accountId, account);
-      console.log("💾 OIDC Account stored:", accountId);
- 
-      // ✅ Use interactionResult with explicit UID instead of interactionFinished(req, res,...)
-      const result = {
-        login: {
-          accountId,
-          remember: true
-        }
-      };
- 
-      console.log("🎯 Completing OIDC login flow via interactionResult for UID:", uid);
-      const redirectTo = await oidc.interactionResult(uid, result, {
-        mergeWithLastSubmission: false
-      });
- 
-      console.log("✅ OIDC login flow completed, redirecting to:", redirectTo);
-      return res.redirect(redirectTo);
-    } catch (error) {
-      console.error("❌ Google callback error:", error);
-      res.status(500).send("Authentication error");
-    }
-  }
-);
-
-// Interaction Page
+// Interaction page (login + consent)
 app.get("/interaction/:uid", async (req, res) => {
-  const uid = req.params.uid;
-
-  console.log("📄 Interaction page for:", uid);
+  const paramUid = req.params.uid;
+  console.log("📄 Interaction page for:", paramUid);
 
   try {
     const interaction = await oidc.interactionDetails(req, res);
-    console.log("📋 Interaction prompt:", interaction.prompt.name);
+    console.log("📋 interaction.uid:", interaction.uid);
+    console.log("📋 prompt:", interaction.prompt.name);
 
+    const uid = interaction.uid;
     req.session.currentUid = uid;
     await req.session.save();
 
     if (interaction.prompt.name === "login") {
-      // Show login page with Google button
+      // HTML page with Google Identity that POSTS id_token back
       res.send(`
+        <!DOCTYPE html>
         <html>
+          <head>
+            <meta charset="UTF-8" />
+            <title>Login</title>
+            <script src="https://accounts.google.com/gsi/client" async defer></script>
+          </head>
           <body>
-            <h2>Login</h2>
-            <a href="${BASE_URL}/auth/start?uid=${uid}">Login with Google</a>
+            <h2>Login with Google</h2>
+
+            <form id="login-form" method="POST" action="/interaction/${uid}/login">
+              <input type="hidden" name="id_token" id="id_token_field" />
+            </form>
+
+            <div 
+              id="g_id_onload"
+              data-client_id="${GOOGLE_CLIENT_ID}"
+              data-context="signin"
+              data-callback="handleCredentialResponse"
+              data-auto_prompt="false">
+            </div>
+            <div 
+              class="g_id_signin"
+              data-type="standard"
+              data-size="large"
+              data-theme="outline"
+              data-text="signin_with"
+              data-shape="rectangular"
+              data-logo_alignment="left">
+            </div>
+
+            <script>
+              function handleCredentialResponse(response) {
+                try {
+                  var idToken = response.credential;
+                  document.getElementById('id_token_field').value = idToken;
+                  document.getElementById('login-form').submit();
+                } catch (e) {
+                  console.error("Error in handleCredentialResponse:", e);
+                  alert("Unexpected error during sign-in.");
+                }
+              }
+            </script>
           </body>
         </html>
       `);
     } else if (interaction.prompt.name === "consent") {
-      console.log("✅ Auto-consenting...");
+      console.log("✅ Auto-consenting scopes openid email profile");
       const result = {
         consent: {
-          grantScopes: ["openid", "email", "profile"]
-        }
+          grantScopes: ["openid", "email", "profile"],
+        },
       };
       await oidc.interactionFinished(req, res, result, {
-        mergeWithLastSubmission: true
+        mergeWithLastSubmission: true,
       });
     } else {
-      // Fallback for other prompts
       res.send(`Unhandled prompt: ${interaction.prompt.name}`);
     }
   } catch (error) {
-    console.error("❌ Interaction error:", error.message);
-    res.send(`Error: ${error.message}`);
+    console.error("❌ Interaction error:", error);
+    res.status(500).send(`Interaction error: ${error.message}`);
   }
 });
 
-// Auth routes
-app.get("/auth/failure", (req, res) => {
-  res.send("Google authentication failed");
+// POST: Google ID token → verify → Shopify customer → finish interaction
+app.post("/interaction/:uid/login", async (req, res) => {
+  const uid = req.params.uid;
+  console.log("🔐 POST /interaction/:uid/login for UID:", uid);
+
+  try {
+    const { id_token } = req.body;
+    if (!id_token) {
+      return res.status(400).send("Missing id_token");
+    }
+
+    // Verify Google ID token
+    const ticket = await googleClient.verifyIdToken({
+      idToken: id_token,
+      audience: GOOGLE_CLIENT_ID,
+    });
+    const payload = ticket.getPayload();
+    console.log("✅ Google ID token payload:", payload);
+
+    // Map Google user -> Shopify customer
+    const shopifyCustomer = await shopifyService.findOrCreateCustomer(payload);
+    console.log("🛍️ Shopify Customer ID:", shopifyCustomer.id);
+
+    const accountId = shopifyCustomer.id.toString();
+
+    // Store account for findAccount()
+    const account = {
+      accountId,
+      async claims(use, scope) {
+        return {
+          sub: accountId,
+          email: shopifyCustomer.email,
+          email_verified: true,
+          name: `${shopifyCustomer.first_name || ""} ${
+            shopifyCustomer.last_name || ""
+          }`.trim(),
+        };
+      },
+    };
+    accounts.set(accountId, account);
+    console.log("💾 OIDC Account stored:", accountId);
+
+    const result = {
+      login: {
+        accountId,
+        remember: true,
+      },
+    };
+
+    console.log("🎯 Completing OIDC login via interactionFinished for UID:", uid);
+
+    // Let oidc-provider handle redirect (DON'T write to res after this)
+    await oidc.interactionFinished(req, res, result, {
+      mergeWithLastSubmission: false,
+    });
+  } catch (error) {
+    console.error("❌ /interaction/:uid/login error:", error);
+    return res.status(500).send("Authentication error: " + error.message);
+  }
 });
 
-// Mount OIDC routes (must be last)
+// Mount OIDC routes last
 app.use(oidc.callback());
 
 // Start server
 app.listen(PORT, () => {
-  console.log(`🔥 OIDC Provider running at: ${BASE_URL}`);
+  console.log(`🔥 OIDC Provider running at: ${BASE_URL} (port ${PORT})`);
   console.log(`🛍️ Shopify Client ID: ${SHOPIFY_CLIENT_ID}`);
 });
